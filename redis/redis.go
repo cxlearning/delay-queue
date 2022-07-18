@@ -9,9 +9,9 @@ import (
 )
 
 func init() {
-	Init(&redis.Options{
+	redisInit(&redis.Options{
 		Addr:     "****",
-		Password: "**",
+		Password: "foobared",
 		DB:       2,
 		PoolSize: 10,
 	})
@@ -19,7 +19,7 @@ func init() {
 
 var RDB *redis.Client
 
-func Init(ops *redis.Options) {
+func redisInit(ops *redis.Options) {
 	client := redis.NewClient(ops)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second) // 1s 做为缓存已经太长了
 	defer cancel()
