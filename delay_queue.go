@@ -2,19 +2,38 @@ package delay_queue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/go-redis/redis/v9"
+	"log"
 	my_redis "myProject/delay-queue/redis"
+	"reflect"
+	"strings"
+	"sync"
+	"time"
 )
 
 type DelayQueue struct {
-	zsetName string // redis zset 中存储 时间戳 --》 id
-	hashName string // redis hash 中 存储  id (field) --> 具体信息（json）
+	Logger       loggerFunc
+	zsetName     string        // redis zset 中存储 时间戳 --》 id
+	hashName     string        // redis hash 中 存储  id (field) --> 具体信息（json）
+	workerNum    int           // 工作协程数量
+	workerTicker time.Duration // 工作协程中执行时间间隔
+	fn           Process       // 处理逻辑
+	batchSize    int           // 单次从redis中获取数据个数
 }
 
-func NewDelayQueue(zsetName, hashName string) DelayQueue {
+func NewDelayQueue(zsetName, hashName string, workerNum int, fn Process) DelayQueue {
 	return DelayQueue{
-		zsetName: zsetName,
-		hashName: hashName,
+		Logger: func(level, format string, args ...interface{}) {
+			level = strings.TrimSpace(strings.ToUpper(level))
+			log.Printf("[%s] %s", level, fmt.Sprintf(format, args...))
+		},
+		zsetName:  zsetName,
+		hashName:  hashName,
+		workerNum: workerNum,
+		fn:        fn,
+		batchSize: 10,
 	}
 }
 
@@ -31,10 +50,16 @@ redis.call('HSET', hash_key, hash_field, hash_value)
 return nil
 `)
 
-func (d DelayQueue) EnQueue(seconds int64, id string, content string) error {
+type Item struct {
+	ID      string `json:"id"`
+	ExecTmp int64  `json:"exec_tmp"`
+	Content string `json:"content"`
+}
+
+func (d DelayQueue) EnQueue(item Item) error {
 
 	keys := []string{d.zsetName, d.hashName}
-	values := []interface{}{id, seconds, id, content}
+	values := []interface{}{item.ID, item.ExecTmp, item.ID, item.Content}
 	_, err := EnqueueLua.Run(context.TODO(), my_redis.RDB, keys, values...).Result()
 	if err != nil {
 		return err
@@ -71,15 +96,119 @@ end
 return nil
 `)
 
-
-func (d DelayQueue) DeQueue() (interface{}, error) {
+func (d DelayQueue) DeQueue(maxScore int64, batchSize int) ([]interface{}, error) {
 
 	keys := []string{d.zsetName, d.hashName}
-	values := []interface{}{0, 1111111111111, 0, 10}
+	values := []interface{}{"-inf", maxScore, 0, batchSize}
 	result, err := DeQueueLua.Run(context.TODO(), my_redis.RDB, keys, values...).Result()
 	if err != nil {
 		return nil, err
 	}
 
-	return result, nil
+	list, ok := result.([]interface{})
+	if !ok {
+		panic(fmt.Errorf("expecting list, got %s", reflect.TypeOf(list)))
+	}
+
+	d.log("debug", "moved %d items", len(list))
+	return list, nil
+}
+
+// 具体处理逻辑
+type Process func(ctx context.Context, value interface{}) error
+
+/**
+该函数控制所有的工作线程
+*/
+func (d DelayQueue) Run(ctx context.Context) error {
+	// 包装一层， 该函数退出， 监听改ctx的协程都退出
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < d.workerNum; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			if err := d.worker(ctx, id); err != nil && !errors.Is(err, context.Canceled) {
+				d.log("warn", "worker-%d died: %v", id, err)
+			} else {
+				d.log("info", "worker-%d exited gracefully", id)
+			}
+		}(i)
+	}
+
+	// 确保工作线程存在
+	wg.Wait()
+
+	d.log("info", "all workers returned, DelayQueue shutting down")
+	return nil
+
+}
+
+/**
+工作线程， 定时启用workerDo
+*/
+func (d DelayQueue) worker(ctx context.Context, workerID int) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("panic: %v", v)
+		}
+	}()
+
+	pollTimer := time.NewTimer(d.workerTicker)
+	defer pollTimer.Stop()
+
+	for {
+		select {
+		case <-pollTimer.C:
+			pollTimer.Reset(d.workerTicker)
+			if err = d.workerDo(ctx, workerID); err != nil {
+				d.log("warn", err.Error())
+				return
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+}
+
+/**
+具体的一次工作，
+从redis中拿数据，并处理
+*/
+func (d DelayQueue) workerDo(ctx context.Context, workerID int) error {
+
+	maxScore := time.Now().Add(time.Second * 10).Unix()
+
+	list, err := d.DeQueue(maxScore, d.batchSize)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
+		d.log("warn", err.Error())
+		return err
+	}
+
+	for _, _bin := range list {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			fmt.Printf("workerID:%d, process: %+v\n", workerID, _bin)
+			_ = d.fn(ctx, _bin)
+		}
+	}
+	return nil
+}
+
+type loggerFunc func(level, format string, args ...interface{})
+
+func (d DelayQueue) log(level, format string, args ...interface{}) {
+	if d.Logger == nil {
+		return
+	}
+	d.Logger(level, format, args...)
 }
