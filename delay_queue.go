@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-type delayQueue struct {
+type DelayQueue struct {
 	Logger       loggerFunc
 	zsetName     string        // redis zset 中存储 时间戳 --》 id
 	hashName     string        // redis hash 中 存储  id (field) --> 具体信息（json）
@@ -34,7 +34,7 @@ type DelayQueueConfig struct {
 	Rdb          *redis.Client
 }
 
-func NewDelayQueue(config DelayQueueConfig) delayQueue {
+func NewDelayQueue(config DelayQueueConfig) DelayQueue {
 	if config.ZsetName == "" || config.HashName == "" || config.Fn == nil || config.Rdb == nil {
 		panic("missing required parameters")
 	}
@@ -54,7 +54,7 @@ func NewDelayQueue(config DelayQueueConfig) delayQueue {
 		config.BatchSize = 30
 	}
 
-	return delayQueue{
+	return DelayQueue{
 		Logger:       config.Logger,
 		zsetName:     config.ZsetName,
 		hashName:     config.HashName,
@@ -66,8 +66,8 @@ func NewDelayQueue(config DelayQueueConfig) delayQueue {
 	}
 }
 
-//func NewDelayQueue(zsetName, hashName string, workerNum int, fn Process, rdb *redis.Client) delayQueue {
-//	return delayQueue{
+//func NewDelayQueue(zsetName, hashName string, workerNum int, fn Process, rdb *redis.Client) DelayQueue {
+//	return DelayQueue{
 //		Logger: func(level, format string, args ...interface{}) {
 //			level = strings.TrimSpace(strings.ToUpper(level))
 //			log.Printf("[%s] %s", level, fmt.Sprintf(format, args...))
@@ -100,7 +100,7 @@ type Item struct {
 	Content string `json:"content"`
 }
 
-func (d delayQueue) EnQueue(item Item) error {
+func (d DelayQueue) EnQueue(item Item) error {
 
 	keys := []string{d.zsetName, d.hashName}
 	values := []interface{}{item.ID, item.ExecTmp, item.ID, item.Content}
@@ -140,7 +140,7 @@ end
 return nil
 `)
 
-func (d delayQueue) DeQueue(maxScore int64, batchSize int) ([]interface{}, error) {
+func (d DelayQueue) DeQueue(maxScore int64, batchSize int) ([]interface{}, error) {
 
 	keys := []string{d.zsetName, d.hashName}
 	values := []interface{}{"-inf", maxScore, 0, batchSize}
@@ -164,7 +164,7 @@ type Process func(ctx context.Context, value interface{}) error
 /**
 该函数控制所有的工作线程
 */
-func (d delayQueue) Run(ctx context.Context) error {
+func (d DelayQueue) Run(ctx context.Context) error {
 	// 包装一层， 该函数退出， 监听改ctx的协程都退出
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -186,7 +186,7 @@ func (d delayQueue) Run(ctx context.Context) error {
 	// 确保工作线程存在
 	wg.Wait()
 
-	d.log("info", "all workers returned, delayQueue shutting down")
+	d.log("info", "all workers returned, DelayQueue shutting down")
 	return nil
 
 }
@@ -194,7 +194,7 @@ func (d delayQueue) Run(ctx context.Context) error {
 /**
 工作线程， 定时启用workerDo
 */
-func (d delayQueue) worker(ctx context.Context, workerID int) (err error) {
+func (d DelayQueue) worker(ctx context.Context, workerID int) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			err = fmt.Errorf("panic: %v", v)
@@ -223,7 +223,7 @@ func (d delayQueue) worker(ctx context.Context, workerID int) (err error) {
 具体的一次工作，
 从redis中拿数据，并处理
 */
-func (d delayQueue) workerDo(ctx context.Context, workerID int) error {
+func (d DelayQueue) workerDo(ctx context.Context, workerID int) error {
 
 	maxScore := time.Now().Unix()
 
@@ -249,7 +249,7 @@ func (d delayQueue) workerDo(ctx context.Context, workerID int) error {
 
 type loggerFunc func(level, format string, args ...interface{})
 
-func (d delayQueue) log(level, format string, args ...interface{}) {
+func (d DelayQueue) log(level, format string, args ...interface{}) {
 	if d.Logger == nil {
 		return
 	}
