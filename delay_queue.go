@@ -96,6 +96,7 @@ return nil
 
 type Item struct {
 	ID      string `json:"id"`
+	Type    string `json:"type"`
 	ExecTmp int64  `json:"exec_tmp"`
 	Content string `json:"content"`
 }
